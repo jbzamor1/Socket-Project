@@ -5,7 +5,7 @@ import csv
 import time
 
 def is_prime(num):
-    """Helper function to check if a number is prime."""
+    # Just a math helper to see if a number is prime
     if num <= 1:
         return False
     if num <= 3:
@@ -20,14 +20,14 @@ def is_prime(num):
     return True
 
 def get_table_size(l):
-    # The hash table size, s, is the first prime number larger than 2 * l [cite: 184]
+    # Getting the table size (s) using the formula from the project [cite: 184]
     s = (2 * l) + 1
     while not is_prime(s):
         s += 1
     return s
 
 def main():
-    # Peer should read two command line parameters: the IPv4 address of the manager and the port number 
+    # We need the manager's IP and port to start [cite: 60]
     if len(sys.argv) != 3:
         print("Usage: python peer.py <manager_ip> <manager_port>")
         sys.exit(1)
@@ -36,10 +36,11 @@ def main():
     manager_port = int(sys.argv[2])
     manager_address = (manager_ip, manager_port)
 
-    # A peer reads in a command and constructs a message to be sent over a UDP socket [cite: 73]
+    # Setup our two sockets (one for manager, one for peers)
     m_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     p_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
+    # Variables to remember who we are and our spot in the ring
     peer_name = ""
     my_id = -1
     ring_size = 0
@@ -50,6 +51,7 @@ def main():
 
     print("Peer started. Type commands below:")
 
+    # Use select so we can listen to the keyboard and the network at the same time
     while True:
         sockets_to_watch = [sys.stdin]
         if is_registered:
@@ -58,7 +60,7 @@ def main():
         ready_to_read, _, _ = select.select(sockets_to_watch, [], [])
 
         for sock in ready_to_read:
-            # 1. HANDLE KEYBOARD INPUT (Commands from the user) [cite: 72]
+            # 1. Handle stuff typed in the terminal
             if sock == sys.stdin:
                 command = sys.stdin.readline().strip()
                 if not command:
@@ -74,18 +76,21 @@ def main():
                         m_port = int(parts[3])
                         p_port = int(parts[4])
                         
+                        # Bind our sockets to the ports we picked
                         m_socket.bind((my_ip, m_port))
                         p_socket.bind((my_ip, p_port))
                         is_registered = True
                         
+                        # Send the command to the manager
                         m_socket.sendto(command.encode('utf-8'), manager_address)
                     else:
                         print("Invalid register format.")
                 
                 elif cmd_type in ["setup-dht", "query-dht", "leave-dht", "join-dht", "teardown-dht", "deregister"]:
+                    # Forward these other commands straight to the manager
                     m_socket.sendto(command.encode('utf-8'), manager_address)
                     
-            # 2. HANDLE MESSAGES FROM THE MANAGER (m-port) [cite: 80]
+            # 2. Handle messages coming back from the manager
             elif sock == m_socket:
                 message, _ = m_socket.recvfrom(4096)
                 decoded_msg = message.decode('utf-8')
@@ -95,14 +100,17 @@ def main():
                 if not parts:
                     continue
                     
+                # If the manager says SUCCESS to our setup, that means we are the leader!
                 if parts[0] == "SUCCESS" and len(parts) > 1 and parts[1].startswith(peer_name):
                     print("I am the Leader! Initiating ring setup and reading dataset...")
                     
+                    # Grab the list of peers and figure out the ring size
                     peer_tuples = parts[1:]
                     n = len(peer_tuples)
                     ring_size = n
-                    my_id = 0 # The leader has identifier 0 [cite: 141, 146]
+                    my_id = 0 
                     
+                    # Figure out who my right neighbor is
                     if n > 1:
                         neighbor_info = peer_tuples[1].split(',')
                         right_neighbor = (neighbor_info[1], int(neighbor_info[2]))
@@ -113,48 +121,56 @@ def main():
                         target_ip = target_info[1]
                         target_port = int(target_info[2])
                         
-                        # The leader sends a command set-id to peer_i [cite: 147]
+                        # Send the set-id message to tell everyone else their ID and the whole ring layout [cite: 147, 148]
                         set_id_msg = f"set-id {i} {n} {tuples_str}"
                         p_socket.sendto(set_id_msg.encode('utf-8'), (target_ip, target_port))
 
+                    # Open the dataset
                     file_name = "details-1950.csv" 
                     try:
                         with open(file_name, mode='r', encoding='utf-8') as file:
                             csv_reader = csv.reader(file)
-                            next(csv_reader) # The first line contains the field names and should be skipped [cite: 157]
+                            
+                            # Skip the header row [cite: 157]
+                            next(csv_reader) 
                             records = list(csv_reader)
-                            l = len(records) # Compute the number of storm events, l [cite: 178]
+                            
+                            # Figure out how many rows we have to get our table size
+                            l = len(records) 
                             s = get_table_size(l) 
                             
                             for record in records:
                                 event_id = int(record[0])
-                                pos = event_id % s # First hash function computes a position [cite: 183]
-                                peer_id = pos % n  # Second hash function is the position modulo the ring size n [cite: 185]
                                 
+                                # Do the math to find the table spot (pos) and the peer ID [cite: 183, 185]
+                                pos = event_id % s 
+                                peer_id = pos % n  
+                                
+                                # Put the row back together as a string
                                 record_string = ",".join(record)
                                 store_msg = f"store {peer_id} {pos} {record_string}"
                                 
+                                # If the peer ID is 0, it belongs to me (the leader), so save it locally [cite: 190]
                                 if peer_id == 0:
                                     local_hash_table[pos] = record_string
                                     records_stored_count += 1
                                 else:
-                                    # The leader sends a store command to its right neighbour on the ring [cite: 191]
+                                    # Otherwise, pass it down the ring to my right neighbor [cite: 191]
                                     if right_neighbor:
                                         p_socket.sendto(store_msg.encode('utf-8'), right_neighbor)
                                         
-                        # Wait for the network to finish routing
+                        # Give the network a second to finish passing the data around
                         time.sleep(2)
                         
-                        # The leader outputs the number of records stored at each node [cite: 197]
+                        # Tell the manager we're all done [cite: 197]
                         print(f"DHT Setup Complete. I am storing {records_stored_count} records.")
-                        # Sends a message for the dht-complete command to the manager [cite: 197]
                         complete_msg = f"dht-complete {peer_name}"
                         m_socket.sendto(complete_msg.encode('utf-8'), manager_address)
                         
                     except FileNotFoundError:
                         print(f"Error: '{file_name}' not found.")
 
-            # 3. HANDLE MESSAGES FROM OTHER PEERS (p-port) [cite: 80]
+            # 3. Handle messages from other peers in the ring
             elif sock == p_socket:
                 message, sender_address = p_socket.recvfrom(4096)
                 decoded_msg = message.decode('utf-8')
@@ -166,29 +182,32 @@ def main():
                 cmd = parts[0]
                 
                 if cmd == "set-id":
-                    my_id = int(parts[1]) # On receipt of a set-id, peer_i sets its identifier to i [cite: 149]
-                    ring_size = int(parts[2]) # and the ring size to n [cite: 149]
+                    # We got assigned an ID and the ring layout [cite: 149]
+                    my_id = int(parts[1]) 
+                    ring_size = int(parts[2]) 
                     
                     peer_tuples = parts[3:]
+                    
+                    # Find my right neighbor using modulo math [cite: 150]
                     neighbor_index = (my_id + 1) % ring_size
                     neighbor_info = peer_tuples[neighbor_index].split(',')
-                    
-                    # It stores the 3-tuple of peer_(i+1) mod n to use as the address of its right neighbour [cite: 150]
                     right_neighbor = (neighbor_info[1], int(neighbor_info[2]))
                     
                     print(f"Ring setup: I am node {my_id} of {ring_size}.")
                     print(f"My right neighbor is {neighbor_info[0]} at {right_neighbor[0]}:{right_neighbor[1]}")
                     
                 elif cmd == "store":
+                    # Someone sent us a record to store
                     target_id = int(parts[1])
                     pos = int(parts[2])
                     record_data = parts[3]
                     
                     if target_id == my_id:
-                        # Where it is stored in the local hash table [cite: 192]
+                        # It belongs to me! Save it in my dictionary [cite: 192]
                         local_hash_table[pos] = record_data
                         records_stored_count += 1
                     else:
+                        # Not mine, pass it to my right neighbor [cite: 192]
                         if right_neighbor:
                             p_socket.sendto(message, right_neighbor)
 
