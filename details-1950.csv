@@ -1,0 +1,6 @@
+event_id,state,year,month_name,event_type,cz_type,cz_name,injuries_direct,injuries_indirect,deaths_direct,deaths_indirect,damage_property,damage_crops,tor_f_scale
+10001,ARIZONA,1950,January,Tornado,C,MARICOPA,0,0,0,0,10.00K,0.00K,EF1
+10002,TEXAS,1950,February,Hail,C,DALLAS,0,0,0,0,5.00K,0.00K,EF0
+10003,FLORIDA,1950,March,Thunderstorm Wind,C,MIAMI,1,0,0,0,20.00K,0.00K,EF0
+10004,GEORGIA,1950,April,Heavy Rain,C,ATLANTA,0,0,0,0,2.00K,0.00K,EF0
+10005,CALIFORNIA,1950,May,Strong Wind,Z,LOS ANGELES,0,0,0,0,50.00K,10.00K,EF0
