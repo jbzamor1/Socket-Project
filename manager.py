@@ -33,7 +33,7 @@ def main():
             
         command = parts[0]
         
-        # If we are currently building the table, block any other commands until it's done [cite: 98]
+        # If we are currently building the table, block any other commands until it's done 
         if waiting_for_dht_complete and command != "dht-complete":
             manager_socket.sendto("FAILURE".encode('utf-8'), client_address)
             continue
@@ -43,17 +43,17 @@ def main():
             if len(parts) == 5:
                 peer_name = parts[1]
                 if peer_name not in registered_peers:
-                    # Save their info and mark them as Free so they can be picked later [cite: 81]
+                    # Save their info and mark them as Free so they can be picked later 
                     registered_peers[peer_name] = {
                         "ip": parts[2],
                         "m_port": parts[3],
                         "p_port": parts[4],
                         "state": "Free"
                     }
-                    # Tell them it worked [cite: 82]
+                    # Tell them it worked 
                     response = "SUCCESS" 
                 else:
-                    # Send an error if they are already registered [cite: 85]
+                    # Send an error if they are already registered 
                     response = "FAILURE" 
             else:
                 response = "FAILURE"
@@ -76,7 +76,7 @@ def main():
                 # Get a list of everyone who is Free
                 free_peers = [name for name, info in registered_peers.items() if info["state"] == "Free"]
 
-                # A bunch of checks to make sure we can actually build the DHT [cite: 88, 89, 90, 91, 92]
+                # A bunch of checks to make sure we can actually build the DHT 
                 if peer_name not in registered_peers:
                     response = "FAILURE" 
                 elif n < 3:
@@ -92,7 +92,7 @@ def main():
                     if len(free_peers) < n - 1:
                         response = "FAILURE" 
                     else:
-                        # Upgrade the sender to Leader and lock the server [cite: 94, 98]
+                        # Upgrade the sender to Leader and lock the server 
                         registered_peers[peer_name]["state"] = "Leader"
                         dht_leader = peer_name
                         dht_exists = True 
@@ -106,7 +106,7 @@ def main():
                             
                         leader_info = registered_peers[peer_name]
                         
-                        # Put the leader first in the response string [cite: 96]
+                        # Put the leader first in the response string 
                         response = f"SUCCESS {peer_name},{leader_info['ip']},{leader_info['p_port']}"
                         
                         # Add the rest of the chosen peers
@@ -122,7 +122,7 @@ def main():
             if len(parts) == 2:
                 peer_name = parts[1]
                 
-                # Only the leader is allowed to tell us it's complete [cite: 100]
+                # Only the leader is allowed to tell us it's complete 
                 if peer_name == dht_leader:
                     # Unlock the server
                     waiting_for_dht_complete = False
