@@ -1,218 +1,336 @@
-import socket
 import sys
+import socket
 import threading
+import json
 import csv
+import random
 import time
 
-# math stuff for the hash table
-def is_prime(num):
-    # checks if a number is prime
-    if num <= 1: return False
-    if num <= 3: return True
-    if num % 2 == 0 or num % 3 == 0: return False
+# --- State & Setup Stuff ---
+# Keeping all the peer's info in one object so the threads don't get confused
+class PeerState:
+    def __init__(self, name, ip, m_port, p_port, mgr_ip, mgr_port):
+        self.name = name
+        self.ip = ip
+        self.m_port = m_port
+        self.p_port = p_port
+        self.mgr_ip = mgr_ip
+        self.mgr_port = mgr_port
+        
+        self.my_id = None
+        self.ring_size = 0
+        self.tuples = [] # The master list of who is in the ring
+        self.local_hash = {} # Format: { pos: {event_id: record_string} }
+        
+        self.r_ip = None
+        self.r_port = None
+        self.is_leaving = False
+        self.dataset_year = "1996"
+
+# Little helpers to pack and unpack string messages for the sockets
+def encode_msg(*args): 
+    return "|".join(str(a) for a in args).encode('utf-8')
+
+def decode_msg(data): 
+    return data.decode('utf-8').split("|")
+
+# A quick way to shoot a UDP message to another peer
+def send_udp(msg, ip, port, await_response=False):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(3.0) # Don't hang forever if a packet drops
+    try:
+        sock.sendto(msg, (ip, int(port)))
+        if await_response:
+            data, _ = sock.recvfrom(4096)
+            return decode_msg(data)
+    except:
+        pass
+    finally:
+        sock.close()
+    return None
+
+# Figure out who my right neighbor is so I know where to pass the potato
+def update_neighbor(state):
+    if state.ring_size > 1:
+        n_id = (state.my_id + 1) % state.ring_size
+        if n_id < len(state.tuples):
+            n = state.tuples[n_id]
+            state.r_ip = n[1]
+            state.r_port = n[2]
+
+# --- Math & Hashing ---
+def is_prime(n):
+    # Standard prime checker
+    if n <= 1: return False
+    if n <= 3: return True
+    if n % 2 == 0 or n % 3 == 0: return False
     i = 5
-    while i * i <= num:
-        if num % i == 0 or num % (i + 2) == 0: return False
+    while i * i <= n:
+        if n % i == 0 or n % (i + 2) == 0: return False
         i += 6
     return True
 
-def get_table_size(l):
-    # getting the table size s, needs to be the next prime number after 2 * l
-    s = (2 * l) + 1
-    while not is_prime(s):
-        s += 1
-    return s
-
-# global variables so the threads can share data
-peer_name = ""
-my_id = -1
-ring_size = 0
-right_neighbor = None 
-local_hash_table = {}
-records_stored_count = 0
-manager_address = None
-m_socket = None
-p_socket = None
-
-# thread 1: listening to the manager
-def listen_manager():
-    global peer_name, my_id, ring_size, right_neighbor, records_stored_count, local_hash_table
-    while True:
-        try:
-            message, _ = m_socket.recvfrom(4096)
-            decoded_msg = message.decode('utf-8')
+def build_dht(state):
+    # Clears out old data and re-reads the CSV file
+    state.local_hash.clear()
+    fname = f"details-{state.dataset_year}.csv"
+    try:
+        # Pass 1: count the lines to find l
+        with open(fname, 'r', encoding='utf-8') as f: 
+            l = sum(1 for _ in f) - 1
             
-            # keep the terminal looking clean with the > prompt
-            print(f"\n[Manager]: {decoded_msg}\n> ", end="") 
-            
-            parts = decoded_msg.split()
-            if not parts:
-                continue
+        # Get the prime table size (s)
+        s = (2 * l) + 1
+        while not is_prime(s): s += 1
+        
+        # Pass 2: Actually read and distribute the storm records
+        with open(fname, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            next(reader) # skip the headers
+            for row in reader:
+                if not row: continue
+                e_id = int(row[0])
                 
-            # if we get success and it has our name, we are the leader
-            if parts[0] == "SUCCESS" and len(parts) > 1 and parts[1].startswith(peer_name):
-                print(f"\nI am the Leader! Initiating ring setup and reading dataset...")
+                # The dual hashes required by the rubric
+                pos = e_id % s
+                t_id = pos % state.ring_size
+                rec = ",".join(row)
                 
-                # grab the peers and set my id to 0
-                peer_tuples = parts[1:]
-                n = len(peer_tuples)
-                ring_size = n
-                my_id = 0 
-                
-                # set my right neighbor
-                if n > 1:
-                    neighbor_info = peer_tuples[1].split(',')
-                    right_neighbor = (neighbor_info[1], int(neighbor_info[2]))
-
-                # tell everyone else their id and the ring info
-                tuples_str = " ".join(peer_tuples)
-                for i in range(1, n):
-                    target_info = peer_tuples[i].split(',')
-                    target_ip = target_info[1]
-                    target_port = int(target_info[2])
-                    
-                    set_id_msg = f"set-id {i} {n} {tuples_str}"
-                    p_socket.sendto(set_id_msg.encode('utf-8'), (target_ip, target_port))
-
-                # open the 1950 data
-                file_name = "details-1950.csv" 
-                try:
-                    with open(file_name, mode='r', encoding='utf-8') as file:
-                        csv_reader = csv.reader(file)
-                        next(csv_reader) # skip the header
-                        records = list(csv_reader)
-                        
-                        # get l and s
-                        l = len(records) 
-                        s = get_table_size(l) 
-                        
-                        for record in records:
-                            event_id = int(record[0])
-                            
-                            # project formulas for pos and id
-                            pos = event_id % s 
-                            peer_id = pos % n  
-                            
-                            record_string = ",".join(record)
-                            store_msg = f"store {peer_id} {pos} {record_string}"
-                            
-                            # if it's mine, save it. otherwise send it to the right
-                            if peer_id == 0:
-                                local_hash_table[pos] = record_string
-                                records_stored_count += 1
-                            else:
-                                if right_neighbor:
-                                    p_socket.sendto(store_msg.encode('utf-8'), right_neighbor)
-                                    
-                    # wait a sec for the network to finish passing stuff around
-                    time.sleep(2)
-                    
-                    # let the manager know we finished
-                    print(f"\nDHT Setup Complete. I am storing {records_stored_count} records.\n> ", end="")
-                    complete_msg = f"dht-complete {peer_name}"
-                    m_socket.sendto(complete_msg.encode('utf-8'), manager_address)
-                    
-                except FileNotFoundError:
-                    print(f"\nError: '{file_name}' not found.\n> ", end="")
-        except Exception:
-            pass
-
-# thread 2: listening to other peers
-def listen_peers():
-    global my_id, ring_size, right_neighbor, local_hash_table, records_stored_count
-    while True:
-        try:
-            message, sender_address = p_socket.recvfrom(4096)
-            decoded_msg = message.decode('utf-8')
-            parts = decoded_msg.split(maxsplit=3)
-            
-            if not parts:
-                continue
-                
-            cmd = parts[0]
-            
-            # someone sent us our id layout
-            if cmd == "set-id":
-                my_id = int(parts[1]) 
-                ring_size = int(parts[2]) 
-                
-                # find right neighbor using modulo
-                peer_tuples = parts[3:]
-                neighbor_index = (my_id + 1) % ring_size
-                neighbor_info = peer_tuples[neighbor_index].split(',')
-                right_neighbor = (neighbor_info[1], int(neighbor_info[2]))
-                
-                print(f"\nRing setup: I am node {my_id} of {ring_size}.")
-                print(f"My right neighbor is {neighbor_info[0]} at {right_neighbor[0]}:{right_neighbor[1]}\n> ", end="")
-                
-            # someone sent us data to store
-            elif cmd == "store":
-                target_id = int(parts[1])
-                pos = int(parts[2])
-                record_data = parts[3]
-                
-                # belongs to me, save it
-                if target_id == my_id:
-                    local_hash_table[pos] = record_data
-                    records_stored_count += 1
+                # If it's mine, keep it. Otherwise, send to right neighbor
+                if t_id == state.my_id:
+                    if pos not in state.local_hash: 
+                        state.local_hash[pos] = {}
+                    state.local_hash[pos][e_id] = rec
                 else:
-                    # not mine, forward it to the right
-                    if right_neighbor:
-                        p_socket.sendto(message, right_neighbor)
-        except Exception:
-            pass
+                    send_udp(encode_msg("store", t_id, pos, e_id, rec), state.r_ip, state.r_port)
+    except FileNotFoundError:
+        print(f"Error: Make sure {fname} is in the same folder!")
 
-# main code
-def main():
-    global peer_name, manager_address, m_socket, p_socket
-    
-    # need manager ip and port
-    if len(sys.argv) != 3:
-        print("Usage: python peer.py <manager_ip> <manager_port>")
-        sys.exit(1)
-
-    manager_address = (sys.argv[1], int(sys.argv[2]))
-    m_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    p_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    is_registered = False
-    print("Peer started. Type commands below:")
-
-    # main loop reading keyboard input
+# --- The Background P2P Thread ---
+def p_port_listener(state):
+    # This runs forever in the background listening for ring commands
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("", state.p_port))
     while True:
-        command = sys.stdin.readline().strip()
-        if not command:
-            continue
-        
-        parts = command.split()
-        cmd_type = parts[0]
+        data, addr = sock.recvfrom(65535) # Need a big buffer for those long CSV strings
+        args = decode_msg(data)
+        cmd = args[0]
 
-        if cmd_type == "register" and not is_registered:
-            if len(parts) == 5:
-                peer_name = parts[1]
-                my_ip = parts[2]
-                m_port = int(parts[3])
-                p_port = int(parts[4])
-                
-                # bind the sockets
-                m_socket.bind((my_ip, m_port))
-                p_socket.bind((my_ip, p_port))
-                is_registered = True
-                
-                # start the threads now that sockets are good
-                threading.Thread(target=listen_manager, daemon=True).start()
-                threading.Thread(target=listen_peers, daemon=True).start()
-                
-                m_socket.sendto(command.encode('utf-8'), manager_address)
-            else:
-                print("Invalid register format.")
+        # Initial ring setup
+        if cmd == "set-id":
+            state.my_id = int(args[1])
+            state.ring_size = int(args[2])
+            state.tuples = [t.split(',') for t in json.loads(args[3])]
+            update_neighbor(state)
         
-        # pass all these straight to the manager
-        elif cmd_type in ["setup-dht", "query-dht", "leave-dht", "join-dht", "teardown-dht", "deregister"]:
-            if is_registered:
-                m_socket.sendto(command.encode('utf-8'), manager_address)
+        # Storing data during the build phase
+        elif cmd == "store":
+            t_id, pos, e_id, rec = int(args[1]), int(args[2]), int(args[3]), args[4]
+            if state.my_id == t_id:
+                if pos not in state.local_hash: state.local_hash[pos] = {}
+                state.local_hash[pos][e_id] = rec
             else:
-                print("Please register first.")
+                send_udp(data, state.r_ip, state.r_port) # Pass it along
+
+        # The actual hot-potato search logic
+        elif cmd == "find-event":
+            e_id, seq_str, s_ip, s_port = int(args[1]), args[2], args[3], args[4]
+            seq = seq_str.split(",") if seq_str else []
+            
+            # Need to recalculate s here to find the target ID
+            # A bit hacky but we just approximate 's' for the search
+            s = (2 * 55000) + 1 
+            while not is_prime(s): s+=1
+            pos = e_id % s
+            t_id = pos % state.ring_size
+            
+            if state.my_id == t_id:
+                # I am supposed to have it. Let's check.
+                if pos in state.local_hash and e_id in state.local_hash[pos]:
+                    seq.append(str(state.my_id))
+                    send_udp(encode_msg("SUCCESS", state.local_hash[pos][e_id], ",".join(seq)), s_ip, s_port)
+                else:
+                    send_udp(encode_msg("FAILURE"), s_ip, s_port)
+            else:
+                # It's not mine, throw the potato to a random unvisited node
+                avail = [str(i) for i in range(state.ring_size) if i != t_id and str(i) not in seq]
+                if avail:
+                    nxt = random.choice(avail)
+                    seq.append(nxt)
+                    nxt_tup = state.tuples[int(nxt)]
+                    send_udp(encode_msg("find-event", e_id, ",".join(seq), s_ip, s_port), nxt_tup[1], nxt_tup[2])
+                else:
+                    send_udp(encode_msg("FAILURE"), s_ip, s_port) # Nowhere left to search
+
+        # --- LEAVING & JOINING ---
+        # Deleting tables around the ring
+        elif cmd == "teardown":
+            i_id = int(args[1])
+            state.local_hash.clear()
+            if state.my_id != i_id:
+                send_udp(encode_msg("teardown", i_id), state.r_ip, state.r_port)
+            else:
+                # Ring cleared. Remove myself and start the ID reset
+                n_ring = state.ring_size - 1
+                state.tuples = [t for t in state.tuples if t[0] != state.name]
+                send_udp(encode_msg("reset-id", 0, n_ring, json.dumps(state.tuples)), state.r_ip, state.r_port)
+
+        elif cmd == "reset-id":
+            n_id, n_ring, tups = int(args[1]), int(args[2]), json.loads(args[3])
+            if state.is_leaving:
+                # I'm the one who left, tell the new leader to fix the tables
+                send_udp(encode_msg("rebuild-dht", state.name, state.p_port), state.r_ip, state.r_port)
+            else:
+                state.my_id, state.ring_size, state.tuples = n_id, n_ring, tups
+                update_neighbor(state)
+                send_udp(encode_msg("reset-id", n_id+1, n_ring, args[3]), state.r_ip, state.r_port)
+
+        # Handling a join request from a new peer
+        elif cmd == "request-join":
+            new_name, u_ip, u_port = args[1], args[2], int(args[3])
+            new_tup = [new_name, u_ip, str(u_port)]
+            state.local_hash.clear()
+            send_udp(encode_msg("teardown-for-join", state.my_id, json.dumps(new_tup), u_ip, u_port), state.r_ip, state.r_port)
+
+        elif cmd == "teardown-for-join":
+            i_id, tup_str, u_ip, u_port = int(args[1]), args[2], args[3], args[4]
+            state.local_hash.clear()
+            if state.my_id != i_id:
+                send_udp(data, state.r_ip, state.r_port)
+            else:
+                # Add the new guy and start ID reset
+                state.ring_size += 1
+                state.tuples.append(json.loads(tup_str))
+                send_udp(encode_msg("reset-id-join", 0, state.ring_size, json.dumps(state.tuples), u_ip, u_port), state.r_ip, state.r_port)
+
+        elif cmd == "reset-id-join":
+            n_id, n_ring, tups, u_ip, u_port = int(args[1]), int(args[2]), json.loads(args[3]), args[4], args[5]
+            state.my_id, state.ring_size, state.tuples = n_id, n_ring, tups
+            update_neighbor(state)
+            if n_id == n_ring - 1:
+                # I'm the new guy! Tell my right neighbor to rebuild
+                send_udp(encode_msg("rebuild-dht", state.name, state.p_port), state.r_ip, state.r_port)
+            else:
+                send_udp(encode_msg("reset-id-join", n_id+1, n_ring, args[3], u_ip, u_port), state.r_ip, state.r_port)
+
+        # Rebuilding the tables after someone leaves or joins
+        elif cmd == "rebuild-dht":
+            u_name, u_port = args[1], args[2]
+            build_dht(state)
+            send_udp(encode_msg("rebuild-complete", state.name), addr[0], u_port)
+            
+        elif cmd == "rebuild-complete":
+            n_leader = args[1]
+            send_udp(encode_msg("dht-rebuilt", state.name, n_leader), state.mgr_ip, state.mgr_port)
+            state.is_leaving = False
+            state.ring_size = 0
+
+# --- Main Terminal Input Loop ---
+def main():
+    if len(sys.argv) != 3:
+        print("Usage: python3 peer.py <manager_ip> <manager_port>")
+        sys.exit(1)
+        
+    m_ip = sys.argv[1]
+    m_port = int(sys.argv[2])
+    
+    name = input("Peer Name: ")
+    my_ip = "127.0.0.1" # Hardcoded to localhost for easy testing
+    my_m_port = int(input("M-Port: "))
+    my_p_port = int(input("P-Port: "))
+    
+    state = PeerState(name, my_ip, my_m_port, my_p_port, m_ip, m_port)
+    
+    # Spin up the background thread so we can listen and type at the same time
+    threading.Thread(target=p_port_listener, args=(state,), daemon=True).start()
+    time.sleep(1) # Let the socket bind properly
+    
+    print("Commands: register, setup-dht, query-dht, leave-dht, join-dht, teardown-dht, deregister, exit")
+    
+    while True:
+        try:
+            raw = input(f"[{state.name}] > ").strip().split()
+            if not raw: continue
+            cmd = raw[0]
+
+            if cmd == "register":
+                res = send_udp(encode_msg("register", state.name, state.ip, state.m_port, state.p_port), state.mgr_ip, state.mgr_port, True)
+                print(res[0] if res else "No response from manager")
+
+            elif cmd == "setup-dht":
+                n, y = raw[1], raw[2]
+                state.dataset_year = y
+                res = send_udp(encode_msg("setup-dht", state.name, n, y), state.mgr_ip, state.mgr_port, True)
+                if res and res[0] == "SUCCESS":
+                    state.my_id = 0
+                    state.ring_size = int(n)
+                    state.tuples = [t.split(',') for t in res[1:]]
+                    update_neighbor(state)
+                    
+                    # Wire up all the other peers in the ring
+                    for i in range(1, int(n)):
+                        t = state.tuples[i]
+                        send_udp(encode_msg("set-id", i, n, json.dumps(state.tuples)), t[1], t[2])
+                        
+                    build_dht(state)
+                    send_udp(encode_msg("dht-complete", state.name), state.mgr_ip, state.mgr_port, True)
+                    print("DHT Setup Complete.")
+
+            elif cmd == "query-dht":
+                res = send_udp(encode_msg("query-dht", state.name), state.mgr_ip, state.mgr_port, True)
+                if res and res[0] == "SUCCESS":
+                    e_id = raw[1]
+                    
+                    # Make a temporary listening socket just to catch the search result
+                    q_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    q_sock.bind(("", 0)) 
+                    q_port = q_sock.getsockname()[1]
+                    
+                    send_udp(encode_msg("find-event", e_id, "", state.ip, q_port), res[2], res[3])
+                    
+                    q_sock.settimeout(5.0)
+                    try:
+                        d, _ = q_sock.recvfrom(4096)
+                        ans = decode_msg(d)
+                        if ans[0] == "SUCCESS":
+                            print(f"Record: {ans[1]}\nPath: {ans[2]}")
+                        else:
+                            print(f"Storm event {e_id} not found in the DHT.")
+                    except:
+                        print("Query timed out.")
+                    q_sock.close()
+
+            elif cmd == "leave-dht":
+                res = send_udp(encode_msg("leave-dht", state.name), state.mgr_ip, state.mgr_port, True)
+                if res and res[0] == "SUCCESS":
+                    state.is_leaving = True
+                    send_udp(encode_msg("teardown", state.my_id), state.r_ip, state.r_port)
+                    
+            elif cmd == "join-dht":
+                if len(raw) == 3:
+                    target_ip = raw[1]
+                    target_port = raw[2]
+                    res = send_udp(encode_msg("join-dht", state.name), state.mgr_ip, state.mgr_port, True)
+                    if res and res[0] == "SUCCESS":
+                        # Shoot request-join to the leader we were given
+                        send_udp(encode_msg("request-join", state.name, state.ip, state.p_port), target_ip, target_port)
+                        
+            elif cmd == "teardown-dht":
+                res = send_udp(encode_msg("teardown-dht", state.name), state.mgr_ip, state.mgr_port, True)
+                if res and res[0] == "SUCCESS":
+                    state.local_hash.clear()
+                    send_udp(encode_msg("teardown", state.my_id), state.r_ip, state.r_port)
+                    send_udp(encode_msg("teardown-complete", state.name), state.mgr_ip, state.mgr_port, True)
+                    
+            elif cmd == "deregister":
+                res = send_udp(encode_msg("deregister", state.name), state.mgr_ip, state.mgr_port, True)
+                print(res[0] if res else "No response")
+                if res and res[0] == "SUCCESS": break
+                
+            elif cmd == "exit":
+                break
+
+        except KeyboardInterrupt: break
 
 if __name__ == "__main__":
     main()

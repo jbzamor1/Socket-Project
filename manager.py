@@ -1,138 +1,160 @@
-import socket
 import sys
+import socket
 import random
 
+# Helper functions to pack/unpack messages so I don't have to keep doing it manually
+def encode_msg(command, *args):
+    return "|".join([str(command)] + [str(a) for a in args]).encode('utf-8')
+
+def decode_msg(data):
+    return data.decode('utf-8').split("|")
+
 def main():
-    # Grab the port number from the command line
+    # Make sure we actually passed the port number when running this in the terminal
     if len(sys.argv) != 2:
-        print("Usage: python manager.py <port>")
+        print("Usage: python3 manager.py <listen_port>")
         sys.exit(1)
+        
+    m_port = int(sys.argv[1])
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server_socket.bind(("", m_port))
+    
+    print(f"Manager listening on port {m_port}...")
 
-    port = int(sys.argv[1])
-    manager_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    manager_socket.bind(('', port))
+    # Big dictionary to keep track of everyone
+    # Format: peer_name -> {'ip': ip, 'm_port': m, 'p_port': p, 'state': 'Free'/'Leader'/'InDHT'}
+    peers = {} 
     
-    print(f"Manager listening on port {port}...")
+    # Keep track of the DHT itself so we don't accidentally make two
+    dht_state = {'exists': False, 'leader': None, 'size': 0}
     
-    # Dictionary to keep track of everyone connected
-    registered_peers = {} 
-    
-    # Flags to track if we're building the DHT right now
-    dht_exists = False
-    waiting_for_dht_complete = False
-    dht_leader = ""
+    # Sometimes we need to lock the server and only wait for a specific message to finish a process
+    waiting_for = None 
 
-    # Infinite loop to keep the server awake
+    # Infinite loop to keep the server awake forever
     while True:
-        message, client_address = manager_socket.recvfrom(2048)
-        decoded_msg = message.decode('utf-8').strip()
-        parts = decoded_msg.split()
-        
-        if not parts:
+        data, addr = server_socket.recvfrom(4096)
+        args = decode_msg(data)
+        cmd = args[0]
+
+        # Assume it fails by default, makes the code shorter
+        response = encode_msg("FAILURE") 
+
+        # If we are locked waiting for something specific, ignore everything else
+        if waiting_for and cmd != waiting_for and cmd not in ["teardown-complete"]:
+            server_socket.sendto(encode_msg("FAILURE"), addr)
             continue
+
+        if cmd == "register":
+            # Grab all the registration info
+            p_name, p_ip, pm_port, pp_port = args[1], args[2], args[3], args[4]
+            # Only register if the name isn't taken already
+            if p_name not in peers:
+                # They start as Free
+                peers[p_name] = {'ip': p_ip, 'm_port': pm_port, 'p_port': pp_port, 'state': 'Free'}
+                response = encode_msg("SUCCESS")
+
+        elif cmd == "setup-dht":
+            p_name, n_str, year = args[1], args[2], args[3]
+            n = int(n_str)
+            # Lots of rules here: peer must exist, n >= 3, enough users registered, and no existing DHT
+            if p_name in peers and n >= 3 and len(peers) >= n and not dht_state['exists']:
+                # Make this guy the leader
+                peers[p_name]['state'] = 'Leader'
+                dht_state['leader'] = p_name
+                dht_state['size'] = n
+                
+                # Find all the Free peers to pick from
+                free_peers = [name for name, info in peers.items() if info['state'] == 'Free' and name != p_name]
+                selected = random.sample(free_peers, n - 1)
+                
+                # Pack the leader's info first
+                tuples = [f"{p_name},{peers[p_name]['ip']},{peers[p_name]['p_port']}"]
+                # Add the rest of the randomly picked guys and update their state
+                for sp in selected:
+                    peers[sp]['state'] = 'InDHT'
+                    tuples.append(f"{sp},{peers[sp]['ip']},{peers[sp]['p_port']}")
+                
+                # Lock the server until the leader says the DHT is done
+                waiting_for = "dht-complete"
+                response = encode_msg("SUCCESS", *tuples)
+
+        elif cmd == "dht-complete":
+            p_name = args[1]
+            # Gotta make sure only the leader can finish this
+            if p_name == dht_state['leader']:
+                dht_state['exists'] = True
+                waiting_for = None # Unlock the server
+                response = encode_msg("SUCCESS")
+
+        elif cmd == "query-dht":
+            p_name = args[1]
+            # Only Free peers can query an existing DHT
+            if dht_state['exists'] and p_name in peers and peers[p_name]['state'] == 'Free':
+                # Pick a random node that's actually in the DHT to give to the client
+                active_dht = [name for name, info in peers.items() if info['state'] in ['Leader', 'InDHT']]
+                target = random.choice(active_dht)
+                t_info = peers[target]
+                response = encode_msg("SUCCESS", target, t_info['ip'], t_info['p_port'])
+
+        elif cmd == "leave-dht":
+            p_name = args[1]
+            # Check if they are actually in the DHT
+            if dht_state['exists'] and peers.get(p_name, {}).get('state') in ['Leader', 'InDHT']:
+                waiting_for = "dht-rebuilt" # Lock until rebuilt
+                response = encode_msg("SUCCESS")
+
+        elif cmd == "join-dht":
+            p_name = args[1]
+            # Only Free peers can join
+            if dht_state['exists'] and peers.get(p_name, {}).get('state') == 'Free':
+                waiting_for = "dht-rebuilt" # Lock it down
+                l_info = peers[dht_state['leader']]
+                # I'm giving them the leader's info so they know who to talk to on the p-port
+                response = encode_msg("SUCCESS", dht_state['leader'], l_info['ip'], l_info['p_port'])
+
+        elif cmd == "dht-rebuilt":
+            p_name, new_leader = args[1], args[2]
+            waiting_for = None # Unlock
+            dht_state['leader'] = new_leader
+            peers[new_leader]['state'] = 'Leader'
             
-        command = parts[0]
-        
-        # If we are currently building the table, block any other commands until it's done 
-        if waiting_for_dht_complete and command != "dht-complete":
-            manager_socket.sendto("FAILURE".encode('utf-8'), client_address)
-            continue
-        
-        if command == "register":
-            # Check if they sent the right amount of info for registering
-            if len(parts) == 5:
-                peer_name = parts[1]
-                if peer_name not in registered_peers:
-                    # Save their info and mark them as Free so they can be picked later 
-                    registered_peers[peer_name] = {
-                        "ip": parts[2],
-                        "m_port": parts[3],
-                        "p_port": parts[4],
-                        "state": "Free"
-                    }
-                    # Tell them it worked 
-                    response = "SUCCESS" 
-                else:
-                    # Send an error if they are already registered 
-                    response = "FAILURE" 
+            # If they were free, they just joined. If they weren't, they just left.
+            if peers[p_name]['state'] == 'Free': 
+                peers[p_name]['state'] = 'InDHT'
             else:
-                response = "FAILURE"
+                peers[p_name]['state'] = 'Free'
                 
-            manager_socket.sendto(response.encode('utf-8'), client_address)
+            response = encode_msg("SUCCESS")
 
-        elif command == "setup-dht":
-            if len(parts) == 4:
-                peer_name = parts[1]
-                
-                # Make sure n is actually a number
-                try:
-                    n = int(parts[2])
-                except ValueError:
-                    manager_socket.sendto("FAILURE".encode('utf-8'), client_address)
-                    continue
-                    
-                yyyy = parts[3]
-                
-                # Get a list of everyone who is Free
-                free_peers = [name for name, info in registered_peers.items() if info["state"] == "Free"]
+        elif cmd == "deregister":
+            p_name = args[1]
+            # You can't deregister if you are in the DHT
+            if p_name in peers and peers[p_name]['state'] == 'Free':
+                del peers[p_name] # Bye
+                response = encode_msg("SUCCESS")
 
-                # A bunch of checks to make sure we can actually build the DHT 
-                if peer_name not in registered_peers:
-                    response = "FAILURE" 
-                elif n < 3:
-                    response = "FAILURE" 
-                elif len(registered_peers) < n:
-                    response = "FAILURE" 
-                elif dht_exists:
-                    response = "FAILURE" 
-                elif peer_name not in free_peers:
-                    response = "FAILURE"
-                else:
-                    free_peers.remove(peer_name)
-                    if len(free_peers) < n - 1:
-                        response = "FAILURE" 
-                    else:
-                        # Upgrade the sender to Leader and lock the server 
-                        registered_peers[peer_name]["state"] = "Leader"
-                        dht_leader = peer_name
-                        dht_exists = True 
-                        waiting_for_dht_complete = True 
-                        
-                        # Pick the other peers randomly [cite: 94]
-                        selected_peers = random.sample(free_peers, n - 1)
-                        
-                        for p in selected_peers:
-                            registered_peers[p]["state"] = "InDHT"
-                            
-                        leader_info = registered_peers[peer_name]
-                        
-                        # Put the leader first in the response string 
-                        response = f"SUCCESS {peer_name},{leader_info['ip']},{leader_info['p_port']}"
-                        
-                        # Add the rest of the chosen peers
-                        for p in selected_peers:
-                            p_info = registered_peers[p]
-                            response += f" {p},{p_info['ip']},{p_info['p_port']}"
-            else:
-                response = "FAILURE"
-                
-            manager_socket.sendto(response.encode('utf-8'), client_address)
+        elif cmd == "teardown-dht":
+            p_name = args[1]
+            # Only the leader can destroy everything
+            if p_name == dht_state['leader']:
+                waiting_for = "teardown-complete"
+                response = encode_msg("SUCCESS")
 
-        elif command == "dht-complete":
-            if len(parts) == 2:
-                peer_name = parts[1]
-                
-                # Only the leader is allowed to tell us it's complete 
-                if peer_name == dht_leader:
-                    # Unlock the server
-                    waiting_for_dht_complete = False
-                    response = "SUCCESS" 
-                else:
-                    response = "FAILURE"
-            else:
-                response = "FAILURE"
-                
-            manager_socket.sendto(response.encode('utf-8'), client_address)
+        elif cmd == "teardown-complete":
+            p_name = args[1]
+            if p_name == dht_state['leader']:
+                # Set everyone who was in the DHT back to Free
+                for p in peers:
+                    if peers[p]['state'] in ['Leader', 'InDHT']:
+                        peers[p]['state'] = 'Free'
+                dht_state['exists'] = False
+                dht_state['leader'] = None
+                waiting_for = None # Unlock
+                response = encode_msg("SUCCESS")
+
+        # Send the response back to whoever asked
+        server_socket.sendto(response, addr)
 
 if __name__ == "__main__":
     main()
