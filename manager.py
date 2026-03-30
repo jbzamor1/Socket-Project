@@ -3,33 +3,41 @@ import sys
 import json
 import random
 
+# Pack message with pipes for UDP
 def encode_msg(*args):
     return "|".join(str(a) for a in args).encode('utf-8')
 
+# Unpack message back into strings
 def decode_msg(data):
     return data.decode('utf-8').split("|")
 
 class Manager:
     def __init__(self):
+        # Stores connected peers
         self.peers = {} 
 
     def handle_msg(self, data, addr, sock):
         args = decode_msg(data)
-        cmd = args[0]
+        cmd = args[0] # First item is the command
 
         if cmd == "register":
             name, ip, m_port, p_port = args[1], args[2], args[3], args[4]
+            # Save peer info
             self.peers[name] = {"ip": ip, "m_port": m_port, "p_port": p_port, "name": name}
             print(f"Registered {name} [{ip}:{m_port}]", flush=True)
             sock.sendto(encode_msg("SUCCESS"), addr)
 
         elif cmd == "setup-dht":
             leader_name, n, year = args[1], int(args[2]), args[3]
+            # Check if we have enough peers
             if len(self.peers) < n:
                 sock.sendto(encode_msg("FAILURE", "Not enough peers"), addr)
             else:
+                # Grab the first n peers
                 selected = list(self.peers.values())[:n]
                 tup_list = [[p["name"], p["ip"], p["p_port"]] for p in selected]
+                
+                # Send the list back
                 msg = ["SUCCESS"] + [",".join(map(str, t)) for t in tup_list]
                 sock.sendto(encode_msg(*msg), addr)
                 print(f"DHT setup initiated by {leader_name} for {n} nodes using {year} data.", flush=True)
@@ -38,6 +46,7 @@ class Manager:
             if not self.peers:
                 sock.sendto(encode_msg("FAILURE"), addr)
             else:
+                # Point them to a random peer
                 p = random.choice(list(self.peers.values()))
                 sock.sendto(encode_msg("SUCCESS", p["name"], p["ip"], p["p_port"]), addr)
 
@@ -67,18 +76,23 @@ class Manager:
 
         elif cmd == "deregister":
             name = args[1]
+            # Remove peer if they exist
             if name in self.peers:
                 del self.peers[name]
                 print(f"Deregistered {name}.", flush=True)
             sock.sendto(encode_msg("SUCCESS"), addr)
 
 def main():
+    # Default to port 5000 if not provided
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
+    
+    # Setup UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", port))
     mgr = Manager()
     print(f"Manager listening on port {port}...", flush=True)
 
+    # Listen loop
     while True:
         data, addr = sock.recvfrom(65535)
         mgr.handle_msg(data, addr, sock)
