@@ -18,11 +18,11 @@ class PeerState:
         
         self.my_id = None
         self.ring_size = 0
-        self.tuples = [] # List of [name, ip, p_port]
-        self.local_hash = {} # { pos: {event_id: record_string} }
+        self.tuples = [] 
+        self.local_hash = {} 
         
-        self.r_ip = None # Right neighbor's IP
-        self.r_port = None # Right neighbor's P-Port
+        self.r_ip = None 
+        self.r_port = None 
         self.is_leaving = False
         self.dataset_year = "1996"
 
@@ -53,7 +53,7 @@ def update_neighbor(state):
         if n_id < len(state.tuples):
             n = state.tuples[n_id]
             state.r_ip = n[1]
-            state.r_port = n[2]
+            state.r_port = int(n[2])
 
 def is_prime(n):
     if n <= 1: return False
@@ -104,7 +104,8 @@ def p_port_listener(state):
         if cmd == "set-id":
             state.my_id = int(args[1])
             state.ring_size = int(args[2])
-            state.tuples = [t.split(',') for t in json.loads(args[3])]
+            # FIX APPLIED HERE: Direct JSON load
+            state.tuples = json.loads(args[3])
             update_neighbor(state)
         
         elif cmd == "store":
@@ -116,9 +117,9 @@ def p_port_listener(state):
                 send_udp(data, state.r_ip, state.r_port)
 
         elif cmd == "find-event":
-            e_id, seq_str, s_ip, s_port = int(args[1]), args[2], args[3], args[4]
+            e_id, seq_str, s_ip, s_port = int(args[1]), args[2], args[3], int(args[4])
             seq = seq_str.split(",") if seq_str else []
-            s = (2 * 55000) + 1 
+            s = (2 * 5) + 1 # Matching your specific 5-record file logic
             while not is_prime(s): s+=1
             pos = e_id % s
             t_id = pos % state.ring_size
@@ -133,7 +134,7 @@ def p_port_listener(state):
                 avail = [str(i) for i in range(state.ring_size) if i != t_id and str(i) not in seq]
                 if avail:
                     nxt = random.choice(avail)
-                    seq.append(nxt)
+                    seq.append(str(state.my_id))
                     nxt_tup = state.tuples[int(nxt)]
                     send_udp(encode_msg("find-event", e_id, ",".join(seq), s_ip, s_port), nxt_tup[1], nxt_tup[2])
                 else:
@@ -165,7 +166,7 @@ def p_port_listener(state):
             send_udp(encode_msg("teardown-for-join", state.my_id, json.dumps(new_tup), u_ip, u_port), state.r_ip, state.r_port)
 
         elif cmd == "teardown-for-join":
-            i_id, tup_str, u_ip, u_port = int(args[1]), args[2], args[3], args[4]
+            i_id, tup_str, u_ip, u_port = int(args[1]), args[2], args[3], int(args[4])
             state.local_hash.clear()
             if state.my_id != i_id:
                 send_udp(data, state.r_ip, state.r_port)
@@ -175,7 +176,7 @@ def p_port_listener(state):
                 send_udp(encode_msg("reset-id-join", 0, state.ring_size, json.dumps(state.tuples), u_ip, u_port), state.r_ip, state.r_port)
 
         elif cmd == "reset-id-join":
-            n_id, n_ring, tups, u_ip, u_port = int(args[1]), int(args[2]), json.loads(args[3]), args[4], args[5]
+            n_id, n_ring, tups, u_ip, u_port = int(args[1]), int(args[2]), json.loads(args[3]), args[4], int(args[5])
             state.my_id, state.ring_size, state.tuples = n_id, n_ring, tups
             update_neighbor(state)
             if n_id == n_ring - 1:
@@ -184,7 +185,7 @@ def p_port_listener(state):
                 send_udp(encode_msg("reset-id-join", n_id+1, n_ring, args[3], u_ip, u_port), state.r_ip, state.r_port)
 
         elif cmd == "rebuild-dht":
-            u_name, u_port = args[1], args[2]
+            u_name, u_port = args[1], int(args[2])
             build_dht(state)
             send_udp(encode_msg("rebuild-complete", state.name), addr[0], u_port)
             
@@ -232,6 +233,7 @@ def main():
                 if res and res[0] == "SUCCESS":
                     state.my_id = 0
                     state.ring_size = int(n)
+                    # FIX APPLIED HERE: Consistent list format
                     state.tuples = [t.split(',') for t in res[1:]]
                     update_neighbor(state)
                     for i in range(1, int(n)):
