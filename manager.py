@@ -11,7 +11,7 @@ def decode_msg(data):
 
 class Manager:
     def __init__(self):
-        self.peers = {} # {name: PeerInfo}
+        self.peers = {} 
 
     def handle_msg(self, data, addr, sock):
         args = decode_msg(data)
@@ -38,12 +38,31 @@ class Manager:
             if not self.peers:
                 sock.sendto(encode_msg("FAILURE"), addr)
             else:
-                # Pick a random peer to act as the entry point for the query
                 p = random.choice(list(self.peers.values()))
                 sock.sendto(encode_msg("SUCCESS", p["name"], p["ip"], p["p_port"]), addr)
 
         elif cmd == "dht-complete":
             print(f"DHT distribution completed by {args[1]}.", flush=True)
+            sock.sendto(encode_msg("SUCCESS"), addr)
+
+        elif cmd == "leave-dht":
+            print(f"{args[1]} left the DHT. Rebuilding...", flush=True)
+            sock.sendto(encode_msg("SUCCESS"), addr)
+
+        elif cmd == "join-dht":
+            print(f"{args[1]} joined the DHT. Rebuilding...", flush=True)
+            sock.sendto(encode_msg("SUCCESS"), addr)
+
+        elif cmd == "teardown-dht":
+            print(f"DHT teardown initiated by {args[1]}.", flush=True)
+            sock.sendto(encode_msg("SUCCESS"), addr)
+
+        elif cmd == "teardown-complete":
+            print(f"DHT teardown complete.", flush=True)
+            sock.sendto(encode_msg("SUCCESS"), addr)
+            
+        elif cmd == "dht-rebuilt":
+            print(f"DHT successfully rebuilt.", flush=True)
             sock.sendto(encode_msg("SUCCESS"), addr)
 
         elif cmd == "deregister":

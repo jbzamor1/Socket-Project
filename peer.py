@@ -215,28 +215,33 @@ def main():
                     send_udp(encode_msg("find-event", raw[1], "", my_ip, p_p), res[2], res[3])
             
             elif cmd == "leave-dht":
-                res = send_udp(encode_msg("leave-dht", state.name), state.mgr_ip, state.mgr_port, True)
+                res = send_udp(encode_msg("leave-dht", name), m_ip, m_port, True)
                 if res and res[0] == "SUCCESS":
+                    print("SUCCESS", flush=True)
                     state.is_leaving = True
                     send_udp(encode_msg("teardown", state.my_id), state.r_ip, state.r_port)
             
             elif cmd == "join-dht":
                 if len(raw) == 3:
                     target_ip, target_port = raw[1], raw[2]
-                    res = send_udp(encode_msg("join-dht", state.name), state.mgr_ip, state.mgr_port, True)
+                    res = send_udp(encode_msg("join-dht", name), m_ip, m_port, True)
                     if res and res[0] == "SUCCESS":
-                        send_udp(encode_msg("request-join", state.name, state.ip, state.p_port), target_ip, target_port)
+                        print("SUCCESS", flush=True)
+                        send_udp(encode_msg("request-join", name, my_ip, p_p), target_ip, target_port)
             
             elif cmd == "teardown-dht":
-                res = send_udp(encode_msg("teardown-dht", state.name), state.mgr_ip, state.mgr_port, True)
+                res = send_udp(encode_msg("teardown-dht", name), m_ip, m_port, True)
                 if res and res[0] == "SUCCESS":
+                    print("SUCCESS", flush=True)
                     state.local_hash.clear()
                     send_udp(encode_msg("teardown", state.my_id), state.r_ip, state.r_port)
-                    send_udp(encode_msg("teardown-complete", state.name), state.mgr_ip, state.mgr_port, True)
+                    send_udp(encode_msg("teardown-complete", name), m_ip, m_port, True)
             
             elif cmd == "deregister":
-                res = send_udp(encode_msg("deregister", state.name), state.mgr_ip, state.mgr_port, True)
-                if res and res[0] == "SUCCESS": break
+                res = send_udp(encode_msg("deregister", name), m_ip, m_port, True)
+                if res and res[0] == "SUCCESS": 
+                    print("SUCCESS", flush=True)
+                    break
             
             elif cmd == "exit": 
                 break
