@@ -135,13 +135,21 @@ def p_port_listener(state):
                 s = get_hash_s(state.dataset_year)
                 with open(f"details-{state.dataset_year}.csv", 'r', encoding='utf-8') as f:
                     r = csv.reader(f); next(r)
+                    count = 0
                     for row in r:
-                        eid = int(row[0])
+                        try:
+                            eid = int(row[7]) # FIX: Look at the 8th column for EVENT_ID
+                        except (ValueError, IndexError): continue
                         pos, tid = eid % s, (eid % s) % state.ring_size
                         if tid == state.my_id:
                             if pos not in state.local_hash: state.local_hash[pos] = {}
                             state.local_hash[pos][eid] = ",".join(row)
                         else: send_udp(encode_msg("store", tid, pos, eid, ",".join(row)), state.r_ip, state.r_port)
+                        
+                        # FIX: Speed limit for UDP buffers
+                        count += 1
+                        if count % 100 == 0: time.sleep(0.01)
+
                 send_udp(encode_msg("rebuild-complete", state.name), addr[0], u_port)
             elif cmd == "rebuild-complete":
                 n_leader = args[1]
@@ -194,17 +202,25 @@ def main():
                     time.sleep(1.5) 
                     
                     s = get_hash_s(y)
+                    print(f"Distributing 48,000+ records across {n} nodes... (Takes ~5 seconds)", flush=True)
                     with open(f"details-{y}.csv", 'r', encoding='utf-8') as f:
                         r = csv.reader(f); next(r)
+                        count = 0
                         for row in r:
-                            eid = int(row[0])
+                            try:
+                                eid = int(row[7]) # FIX: Look at the 8th column for EVENT_ID
+                            except (ValueError, IndexError): continue
                             pos, tid = eid % s, (eid % s) % state.ring_size
                             if tid == 0:
                                 if pos not in state.local_hash: state.local_hash[pos] = {}
                                 state.local_hash[pos][eid] = ",".join(row)
                             else: 
                                 send_udp(encode_msg("store", tid, pos, eid, ",".join(row)), state.r_ip, state.r_port)
-                    
+                            
+                            # FIX: Speed limit for UDP buffers
+                            count += 1
+                            if count % 100 == 0: time.sleep(0.01)
+
                     send_udp(encode_msg("dht-complete", name), m_ip, m_port)
                     print("DHT initialized and records distributed.", flush=True)
             
