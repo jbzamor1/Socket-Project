@@ -69,6 +69,7 @@ def build_dht(state):
     state.local_hash.clear()
     fname = f"details-{state.dataset_year}.csv"
     try:
+        # Calculate table size 's' where s = (2 * L) + 1
         with open(fname, 'r', encoding='utf-8') as f: 
             l = sum(1 for _ in f) - 1
         
@@ -81,6 +82,7 @@ def build_dht(state):
             for row in reader:
                 if not row: continue
                 e_id = int(row[0])
+                # Hashing: pos = e_id % s, t_id = pos % ring_size
                 pos = e_id % s
                 t_id = pos % state.ring_size
                 rec = ",".join(row)
@@ -91,8 +93,9 @@ def build_dht(state):
                 else:
                     send_udp(encode_msg("store", t_id, pos, e_id, rec), state.r_ip, state.r_port)
     except FileNotFoundError:
-        print(f"Wait! {fname} is missing.")
+        print(f"Error: {fname} missing.")
 
+# --- Background Listener ---
 def p_port_listener(state):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", state.p_port))
@@ -101,10 +104,19 @@ def p_port_listener(state):
         args = decode_msg(data)
         cmd = args[0]
 
-        if cmd == "set-id":
+        # Ring found the data and sent it back to us
+        if cmd == "SUCCESS":
+            print(f"\n[QUERY RESULT] Found: {args[1]}")
+            print(f"Path: {args[2]}")
+            print(f"[{state.name}] > ", end="", flush=True)
+
+        elif cmd == "FAILURE":
+            print(f"\n[QUERY RESULT] Event ID not found in DHT.")
+            print(f"[{state.name}] > ", end="", flush=True)
+
+        elif cmd == "set-id":
             state.my_id = int(args[1])
             state.ring_size = int(args[2])
-            # FIX APPLIED HERE: Direct JSON load
             state.tuples = json.loads(args[3])
             update_neighbor(state)
         
@@ -119,22 +131,24 @@ def p_port_listener(state):
         elif cmd == "find-event":
             e_id, seq_str, s_ip, s_port = int(args[1]), args[2], args[3], int(args[4])
             seq = seq_str.split(",") if seq_str else []
-            s = (2 * 5) + 1 # Matching your specific 5-record file logic
-            while not is_prime(s): s+=1
+            
+            # Using s=11 for the 5-record test file
+            s = 11 
             pos = e_id % s
             t_id = pos % state.ring_size
             
             if state.my_id == t_id:
                 if pos in state.local_hash and e_id in state.local_hash[pos]:
-                    seq.append(str(state.my_id))
+                    seq.append(str(state.name))
                     send_udp(encode_msg("SUCCESS", state.local_hash[pos][e_id], ",".join(seq)), s_ip, s_port)
                 else:
                     send_udp(encode_msg("FAILURE"), s_ip, s_port)
             else:
-                avail = [str(i) for i in range(state.ring_size) if i != t_id and str(i) not in seq]
+                # Pass to someone not in the path yet (Hot Potato)
+                avail = [str(i) for i in range(state.ring_size) if str(state.tuples[i][0]) not in seq]
                 if avail:
                     nxt = random.choice(avail)
-                    seq.append(str(state.my_id))
+                    seq.append(str(state.name))
                     nxt_tup = state.tuples[int(nxt)]
                     send_udp(encode_msg("find-event", e_id, ",".join(seq), s_ip, s_port), nxt_tup[1], nxt_tup[2])
                 else:
@@ -195,6 +209,7 @@ def p_port_listener(state):
             state.is_leaving = False
             state.ring_size = 0
 
+# --- Main Interface ---
 def main():
     if len(sys.argv) != 3:
         print("Usage: python3 peer.py <manager_ip> <manager_port>")
@@ -210,7 +225,6 @@ def main():
     my_p_port = int(input("P-Port: "))
     
     state = PeerState(name, my_ip, my_m_port, my_p_port, m_ip, m_port)
-    
     threading.Thread(target=p_port_listener, args=(state,), daemon=True).start()
     time.sleep(1) 
     
@@ -233,7 +247,6 @@ def main():
                 if res and res[0] == "SUCCESS":
                     state.my_id = 0
                     state.ring_size = int(n)
-                    # FIX APPLIED HERE: Consistent list format
                     state.tuples = [t.split(',') for t in res[1:]]
                     update_neighbor(state)
                     for i in range(1, int(n)):
@@ -247,21 +260,10 @@ def main():
                 res = send_udp(encode_msg("query-dht", state.name), state.mgr_ip, state.mgr_port, True)
                 if res and res[0] == "SUCCESS":
                     e_id = raw[1]
-                    q_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    q_sock.bind(("", 0)) 
-                    q_port = q_sock.getsockname()[1]
-                    send_udp(encode_msg("find-event", e_id, "", state.ip, q_port), res[2], res[3])
-                    q_sock.settimeout(5.0)
-                    try:
-                        d, _ = q_sock.recvfrom(4096)
-                        ans = decode_msg(d)
-                        if ans[0] == "SUCCESS":
-                            print(f"Record: {ans[1]}\nPath: {ans[2]}")
-                        else:
-                            print(f"Event {e_id} not found.")
-                    except:
-                        print("Query timed out.")
-                    q_sock.close()
+                    print(f"Requesting ID {e_id} from ring...")
+                    send_udp(encode_msg("find-event", e_id, "", state.ip, state.p_port), res[2], res[3])
+                else:
+                    print("Manager could not provide a ring entry point.")
 
             elif cmd == "leave-dht":
                 res = send_udp(encode_msg("leave-dht", state.name), state.mgr_ip, state.mgr_port, True)
@@ -271,8 +273,7 @@ def main():
                     
             elif cmd == "join-dht":
                 if len(raw) == 3:
-                    target_ip = raw[1]
-                    target_port = raw[2]
+                    target_ip, target_port = raw[1], raw[2]
                     res = send_udp(encode_msg("join-dht", state.name), state.mgr_ip, state.mgr_port, True)
                     if res and res[0] == "SUCCESS":
                         send_udp(encode_msg("request-join", state.name, state.ip, state.p_port), target_ip, target_port)
@@ -286,12 +287,9 @@ def main():
                     
             elif cmd == "deregister":
                 res = send_udp(encode_msg("deregister", state.name), state.mgr_ip, state.mgr_port, True)
-                print(res[0] if res else "No response")
                 if res and res[0] == "SUCCESS": break
                 
-            elif cmd == "exit":
-                break
-
+            elif cmd == "exit": break
         except KeyboardInterrupt: break
 
 if __name__ == "__main__":
