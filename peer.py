@@ -93,17 +93,32 @@ def p_port_listener(state):
                         seq.append(state.name)
                         send_udp(encode_msg("find-event", e_id, ",".join(seq), s_ip, s_port), state.tuples[nxt][1], state.tuples[nxt][2])
                     else: send_udp(encode_msg("FAILURE"), s_ip, s_port)
+            
+            # --- FIXED LEAVE/TEARDOWN LOGIC ---
             elif cmd == "teardown":
+                i_id = int(args[1])
                 state.local_hash.clear()
-                if int(args[1]) != state.my_id: send_udp(data, state.r_ip, state.r_port)
+                if state.my_id != i_id:
+                    send_udp(data, state.r_ip, state.r_port)
+                else:
+                    # Teardown completed the circle. Remove myself and start reset-id.
+                    n_ring = state.ring_size - 1
+                    state.tuples = [t for t in state.tuples if t[0] != state.name]
+                    send_udp(encode_msg("reset-id", 0, n_ring, json.dumps(state.tuples)), state.r_ip, state.r_port)
+                    
             elif cmd == "reset-id":
                 n_id, n_ring, tups = int(args[1]), int(args[2]), json.loads(args[3])
-                if state.is_leaving: send_udp(encode_msg("rebuild-dht", state.name, state.p_port), state.r_ip, state.r_port)
+                state.my_id, state.ring_size, state.tuples = n_id, n_ring, tups
+                nxt = state.tuples[(state.my_id + 1) % state.ring_size]
+                state.r_ip, state.r_port = nxt[1], int(nxt[2])
+                
+                # If I am the last node in the new ring, trigger the rebuild
+                if state.my_id == state.ring_size - 1:
+                    send_udp(encode_msg("rebuild-dht", state.name, state.p_port), state.r_ip, state.r_port)
                 else:
-                    state.my_id, state.ring_size, state.tuples = n_id, n_ring, tups
-                    nxt = state.tuples[(state.my_id + 1) % state.ring_size]
-                    state.r_ip, state.r_port = nxt[1], int(nxt[2])
                     send_udp(encode_msg("reset-id", n_id+1, n_ring, args[3]), state.r_ip, state.r_port)
+            # -----------------------------------
+            
             elif cmd == "request-join":
                 new_tup = [args[1], args[2], args[3]]
                 state.local_hash.clear()
